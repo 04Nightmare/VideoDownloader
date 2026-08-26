@@ -1,0 +1,8 @@
+[package]
+name = "videoDownloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = "1.53.1"
+yt-dlp = "2.8.3"
