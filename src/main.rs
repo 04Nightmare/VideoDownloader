@@ -10,6 +10,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_line(&mut url)?;
 
     let executable_dir = PathBuf::from("libs");
+    let installer = LibraryInstaller::new(executable_dir.clone());
+    installer.install_youtube(None).await?;
+    installer.install_ffmpeg(None).await?;
+
     let output_dir = PathBuf::from("output");
 
     let youtube_dlp = executable_dir.join("yt-dlp");
@@ -24,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = url.trim();
     let video = downloader.fetch_video_infos_fresh(url).await?;
     let video_path = downloader.download_video(&video, "my-video.mp4").await?;
+    println!("The downloaded video at {:?}", video_path);
 
     Ok(())
 }
