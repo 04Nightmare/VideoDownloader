@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     
     let youtube_dlp = PathBuf::from("libs/yt-dlp");
-    let ffmpeg = PathBuf::from("libs/ffmepg");
+    let ffmpeg = PathBuf::from("libs/ffmpeg");
     
     println!("Completed libs download...");
 
@@ -129,14 +129,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Audio stream downloaded: {:?}", audio_path);
 
 
+
         //Combine video and audio
         println!("Combining video and original audio...");
 
         let final_path = downloader
             .combine_audio_and_video_to_path(
-                audio_path.to_str().unwrap(), 
-                video_path.to_str().unwrap(), 
-                video_destinaion.to_str().unwrap()
+                audio_path, 
+                video_path, 
+                &video_destinaion,
             ).await?;
 
         println!("Video Path: {:?}", final_path);
