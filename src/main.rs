@@ -41,60 +41,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     //Original audio
 
-    //Look for explecitely marked original audio.
-    let original_audio = video
+    //Finding available audio formats
+    let audio_formats: Vec<_> = video
         .formats
         .iter()
         .filter(|format| {
             let is_audio_only = format
                 .video_resolution
                 .resolution
-                .as_deref()
-                .map(|resolution| resolution == "audio only")
-                .unwrap_or(false);
+                .as_deref() == Some("audio only");
 
-            let is_original = format
+            //Filter out HLS/M3U8 streams
+            let is_not_hls = format
+                .download_info
+                .manifest_url
+                .is_none();
+            is_audio_only && is_not_hls
+        }).collect();
+
+        //Error if no audio format found
+    if audio_formats.is_empty(){
+        return Err("No non-HLS audio track found".into());
+    }
+
+    //List of explicitely marked "original"
+    let exp_original: Vec<_> = audio_formats
+        .iter()
+        .filter(|format| {
+            format
                 .format_note
                 .as_deref()
-                .map(|note| note.contains("original"))
-                .unwrap_or(false);
+                .map(|note| note.to_lowercase().contains("original"))
+                .unwrap_or(false)
+        }).copied().collect();
+        
+    //Prefer original
+    let candidates = if !exp_original.is_empty(){
+        exp_original
+    }else{
+        audio_formats.clone()
+    };
 
-            is_audio_only && is_original
-        })
+    //select highest quality audio
+    let original_audio = candidates
+        .into_iter()
         .max_by(|a, b| {
             let a_rate = a.rates_info.audio_rate.unwrap_or_default();
             let b_rate = b.rates_info.audio_rate.unwrap_or_default();
+            a_rate.partial_cmp(&b_rate)
+                .unwrap_or(Equal)
+                .then_with(|| {
+                    let a_quality = a.quality_info.quality.unwrap_or_default();
+                    let b_quality = b.quality_info.quality.unwrap_or_default();
+                    a_quality
+                        .partial_cmp(&b_quality)
+                        .unwrap_or(Equal)
+                })
 
-            a_rate.partial_cmp(&b_rate).unwrap_or(Equal)
-        });
-
-    //Otherwise use the only audio track
-    let original_audio = match original_audio {
-        Some(audio) => audio,
-        None => {
-            let audio_tracks: Vec<_> = video
-                .formats
-                .iter()
-                .filter(|format| {
-                    format
-                        .video_resolution
-                        .resolution
-                        .as_deref()
-                        .map(|resolution| resolution == "audio only")
-                        .unwrap_or(false)
-                }).collect();
-            
-            if audio_tracks.len() == 1 {
-                audio_tracks[0]
-            }else {
-                return Err(
-                    format!("Could not determine original audio: found {:#?} audio tracks, but none were marked as original",
-                        audio_tracks
-                    ).into()
-                );
-            }
-        }
-    };
+        }).ok_or("Could not select an audio format")?;
     
     println!("Original audio: {} - {}",
         original_audio.format_id,
