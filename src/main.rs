@@ -40,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Title: {}", video.title);
 
     //Original audio
+
+    //Look for explecitely marked original audio.
     let original_audio = video
         .formats
         .iter()
@@ -64,8 +66,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let b_rate = b.rates_info.audio_rate.unwrap_or_default();
 
             a_rate.partial_cmp(&b_rate).unwrap_or(Equal)
-        })
-        .ok_or("No original audio track found")?;
+        });
+
+    //Otherwise use the only audio track
+    let original_audio = match original_audio {
+        Some(audio) => audio,
+        None => {
+            let audio_tracks: Vec<_> = video
+                .formats
+                .iter()
+                .filter(|format| {
+                    format
+                        .video_resolution
+                        .resolution
+                        .as_deref()
+                        .map(|resolution| resolution == "audio only")
+                        .unwrap_or(false)
+                }).collect();
+            
+            if audio_tracks.len() == 1 {
+                audio_tracks[0]
+            }else {
+                return Err(
+                    format!("Could not determine original audio: found {:#?} audio tracks, but none were marked as original",
+                        audio_tracks
+                    ).into()
+                );
+            }
+        }
+    };
     
     println!("Original audio: {} - {}",
         original_audio.format_id,
@@ -148,10 +177,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio_temp = temp_dir.join("audio_stream");
 
         //Final output path
-        let video_destinaion = temp_dir.join(format!(
-            "{}.mp4",
-            video.title
-        ));
+        let video_destinaion = temp_dir.join("video_download.mp4");
+
+        // let video_destinaion = temp_dir.join(format!(
+        //     "{}.mp4",
+        //     video.title
+        // ));
 
         //Download video stream
         println!("Downloading video...");
@@ -182,8 +213,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Video Path: {:?}", final_path);
 
 
-        //clean temp files
+        //clean temp files and dirs
         let _ = std::fs::remove_file(video_temp);
         let _ = std::fs::remove_file(audio_temp);
+        let _ = std::fs::remove_dir_all("libs");
+        let _ = std::fs::remove_dir("output");
+
     Ok(())
 }
