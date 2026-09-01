@@ -106,74 +106,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
 
-    //video format choice selection
+    //Video quality menu
+
+    //Collect all available video resolution.
+    let mut resolutions: Vec<u32> = video
+        .formats
+        .iter()
+        .filter_map(|format| {
+            format.video_resolution.height
+        })
+        .filter(|height| *height > 0)
+        .collect();
+
+    //Remove duplicate resolutions and sort from heighest to lowest.
+    resolutions.sort_unstable();
+    resolutions.dedup();
+    resolutions.reverse();
+    if resolutions.is_empty(){
+        return Err("No video formats found".into());
+    }
+
+    //Choose quality
     println!();
     println!("Choose video quality: ");
-    println!("1. Best available");
-    println!("2. 1080p");
+    for (index, resolution) in resolutions.iter().enumerate(){
+        println!("{}. {}p", index+1, resolution);
+    }
+
+    println!();
+    print!("Enter choice: ");
+    io::stdout().flush()?;
 
     let mut choice = String::new();
-    io::stdin().read_line(&mut choice).unwrap();
-    let choice = choice.trim();
+    io::stdin().read_line(&mut choice)?;
+    let choice: usize = choice.trim().parse().map_err(|_| "Invalid choice")?;
+    println!();
 
-    let video_format = match choice {
-        //Best quality available
-        "1" => {
-            video
-                .formats
-                .iter()
-                .filter(|format| {
-                    format.video_resolution.width.is_some() && format.video_resolution.height.is_some()
-                })
-                .max_by(|a, b| {
-                    let a_height = a.video_resolution.height.unwrap_or(0);
-                    let b_height = b.video_resolution.height.unwrap_or(0);
-                    a_height.cmp(&b_height)
-                        .then_with(|| {
-                            let a_quality = a.quality_info.quality.unwrap_or_default();
-                            let b_quality = b.quality_info.quality.unwrap_or_default();
-                            a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
-                        })
-                })
-                .ok_or("No video format found")?
-        }
+    if choice == 0 || choice > resolutions.len() {
+        return Err("Invalid choice".into());
+    }
 
-        //Best video upto 1080p
-        "2" => {
-            video
-                .formats
-                .iter()
-                .filter(|format| {
-                    format.video_resolution.width.is_some()
-                    && format.video_resolution.height.is_some()
-                    && format.video_resolution.height.unwrap_or(0) <= 1080
-                })
-                .max_by(|a, b| {
-                    let a_height = a.video_resolution.height.unwrap_or(0);
-                    let b_height = b.video_resolution.height.unwrap_or(0);
-                    a_height.cmp(&b_height)
-                        .then_with(|| {
-                            let a_quality = a.quality_info.quality.unwrap_or_default();
-                            let b_quality = b.quality_info.quality.unwrap_or_default();
-                            a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
-                        })
-                })
-                .ok_or("No video format at or below 1080p found")?
-        }
-        
-        _ => {
-            return Err("Invalid choice. Please enter 1 or 2.".into());
-        }
-    };
+    let selected_height = resolutions[choice-1];
 
-        println!("Video format: {} - {}",
-            video_format.format_id,
-            video_format
-                .video_resolution
-                .resolution
-                .as_deref()
-                .unwrap_or("unknown")
-        );
+    //Find the best video format at selected resolution.
+    let video_format = video
+        .formats
+        .iter()
+        .filter(|format| {
+            format.video_resolution.height == Some(selected_height)
+            && format.video_resolution.width.is_some()
+        })
+        .max_by(|a, b| {
+            let a_quality = a.quality_info.quality.unwrap_or_default();
+            let b_quality = b.quality_info.quality.unwrap_or_default();
+            a_quality
+                .partial_cmp(&b_quality)
+                .unwrap_or(Equal)
+        }).ok_or("Could not find selected video format")?;
+
+    println!("Video format: {} - {}",
+        video_format.format_id,
+        video_format
+            .video_resolution
+            .resolution
+            .as_deref()
+            .unwrap_or("unknown")
+    );
 
         //Temporary paths
         let temp_dir = PathBuf::from("/home/samannyo/Downloads");
