@@ -73,26 +73,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
 
-    //Vest Video format
-    let video_format = video
-        .formats
-        .iter()
-        .filter(|format| {
-            format.video_resolution.width.is_some() && format.video_resolution.height.is_some()
-        })
-        .max_by(|a, b| {
-            let a_height = a.video_resolution.height.unwrap_or(0);
-            let b_height = b.video_resolution.height.unwrap_or(0);
+    //video format choice selection
+    println!();
+    println!("Choose video quality: ");
+    println!("1. Best available");
+    println!("2. 1080p");
 
-            a_height.cmp(&b_height)
-                .then_with(|| {
-                    let a_quality = a.quality_info.quality.unwrap_or(ordered_float::OrderedFloat(0.0));
-                    let b_quality = b.quality_info.quality.unwrap_or(ordered_float::OrderedFloat(0.0));
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice).unwrap();
+    let choice = choice.trim();
 
-                    a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
+    let video_format = match choice {
+        //Best quality available
+        "1" => {
+            video
+                .formats
+                .iter()
+                .filter(|format| {
+                    format.video_resolution.width.is_some() && format.video_resolution.height.is_some()
                 })
-        })
-        .ok_or("No video format found")?;
+                .max_by(|a, b| {
+                    let a_height = a.video_resolution.height.unwrap_or(0);
+                    let b_height = b.video_resolution.height.unwrap_or(0);
+                    a_height.cmp(&b_height)
+                        .then_with(|| {
+                            let a_quality = a.quality_info.quality.unwrap_or_default();
+                            let b_quality = b.quality_info.quality.unwrap_or_default();
+                            a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
+                        })
+                })
+                .ok_or("No video format found")?
+        }
+
+        //Best video upto 1080p
+        "2" => {
+            video
+                .formats
+                .iter()
+                .filter(|format| {
+                    format.video_resolution.width.is_some()
+                    && format.video_resolution.height.is_some()
+                    && format.video_resolution.height.unwrap_or(0) <= 1080
+                })
+                .max_by(|a, b| {
+                    let a_height = a.video_resolution.height.unwrap_or(0);
+                    let b_height = b.video_resolution.height.unwrap_or(0);
+                    a_height.cmp(&b_height)
+                        .then_with(|| {
+                            let a_quality = a.quality_info.quality.unwrap_or_default();
+                            let b_quality = b.quality_info.quality.unwrap_or_default();
+                            a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
+                        })
+                })
+                .ok_or("No video format at or below 1080p found")?
+        }
+        
+        _ => {
+            return Err("Invalid choice. Please enter 1 or 2.".into());
+        }
+    };
 
         println!("Video format: {} - {}",
             video_format.format_id,
