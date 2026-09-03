@@ -2,9 +2,7 @@ use std::cmp::Ordering::Equal;
 use std::io::{self, Write};
 use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
-use yt_dlp::model::{AudioQuality, VideoQuality};
-use std::path::{self, Path, PathBuf};
-use std::fs;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //Fetching video informations.
     println!("Fetching Video Informantion");
     let video = downloader.fetch_video_infos_fresh(url).await?;
-    println!("Title: {}", video.title);
+    println!("VIDEO TITLE: {}", video.title);
 
     //Original audio
 
@@ -226,6 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_file(audio_temp);
         let _ = std::fs::remove_dir_all("libs");
         let _ = std::fs::remove_dir_all("output");
+
+        print!("Press enter to exit...");
+        io::stdout().flush()?;
+        let mut exit = String::new();
+        io::stdin().read_line(&mut exit)?;
 
     Ok(())
 }
