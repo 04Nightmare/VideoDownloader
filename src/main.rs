@@ -173,18 +173,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("unknown")
     );
 
-        //Temporary paths
-        let temp_dir = PathBuf::from("/home/samannyo/Downloads");
-        let video_temp = temp_dir.join("video_stream.mp4");
-        let audio_temp = temp_dir.join("audio_stream");
 
-        //Final output path
-        let video_destinaion = temp_dir.join("video_download.mp4");
+    //Linux
+    // // Temporary paths
+    // let temp_dir = PathBuf::from("/home/samannyo/Downloads");
+    // let video_temp = temp_dir.join("video_stream.mp4");
+    // let audio_temp = temp_dir.join("audio_stream");
+    // //Final output path
+    // let video_destinaion = temp_dir.join("video_download.mp4");
 
-        // let video_destinaion = temp_dir.join(format!(
-        //     "{}.mp4",
-        //     video.title
-        // ));
+
+    //Windows
+    // Temporary paths
+    let video_temp = PathBuf::from("video_stream.mp4");
+    let audio_temp = PathBuf::from("audio_stream");
+    //Final output path
+    let video_destinaion = PathBuf::from("C:\\Users\\samannyo\\Downloads\\video_download.mp4");
+
+
 
         //Download video stream
         println!("Downloading video...");
@@ -219,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_file(video_temp);
         let _ = std::fs::remove_file(audio_temp);
         let _ = std::fs::remove_dir_all("libs");
-        let _ = std::fs::remove_dir("output");
+        let _ = std::fs::remove_dir_all("output");
 
     Ok(())
 }

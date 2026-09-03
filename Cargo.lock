@@ -2416,7 +2416,6 @@ dependencies = [
 name = "videoDownloader"
 version = "0.1.0"
 dependencies = [
- "ordered-float",
  "tokio",
  "yt-dlp",
 ]
