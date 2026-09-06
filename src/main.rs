@@ -2,7 +2,6 @@ use std::cmp::Ordering::Equal;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use yt_dlp::Downloader;
-use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,22 +12,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let output_dir = PathBuf::from("output");
     
-    // Install bins: yt-dlp, ffmpeg.
+    // Install bins: yt-dlp, ffmpeg (skipped if already present).
     let libraries_dir = PathBuf::from("libs");
-    let installer = LibraryInstaller::new(libraries_dir);
-    installer.install_youtube(None).await?;
-    installer.install_ffmpeg(None).await?;
-    
-    println!("Completed libs download...");
-
-    let youtube_dlp = PathBuf::from("libs/yt-dlp");
-    let ffmpeg = PathBuf::from("libs/ffmpeg");
-    
-    let libraries = Libraries::new(youtube_dlp, ffmpeg);
-    let downloader = Downloader::builder(
-        libraries, 
+    let downloader = Downloader::with_new_binaries(
+        libraries_dir,
         output_dir
-    ).build().await?;
+    ).await?.build().await?;
+
+    println!("Libraries ready.");
 
     // Fetching video informations.
     println!("Fetching Video Information");
@@ -220,3 +211,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+
