@@ -1,8 +1,8 @@
 use std::cmp::Ordering::Equal;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
-use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,33 +13,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let output_dir = PathBuf::from("output");
     
-    //Install bins: yt-dlp, ffmpeg.
+    // Install bins: yt-dlp, ffmpeg.
     let libraries_dir = PathBuf::from("libs");
     let installer = LibraryInstaller::new(libraries_dir);
     installer.install_youtube(None).await?;
     installer.install_ffmpeg(None).await?;
     
-    
-    
+    println!("Completed libs download...");
+
     let youtube_dlp = PathBuf::from("libs/yt-dlp");
     let ffmpeg = PathBuf::from("libs/ffmpeg");
     
-    println!("Completed libs download...");
-
     let libraries = Libraries::new(youtube_dlp, ffmpeg);
     let downloader = Downloader::builder(
         libraries, 
         output_dir
     ).build().await?;
 
-    //Fetching video informations.
-    println!("Fetching Video Informantion");
+    // Fetching video informations.
+    println!("Fetching Video Information");
     let video = downloader.fetch_video_infos_fresh(url).await?;
     println!("VIDEO TITLE: {}", video.title);
 
-    //Original audio
+    // Original audio
 
-    //Finding available audio formats
+    // Finding available audio formats
     let audio_formats: Vec<_> = video
         .formats
         .iter()
@@ -49,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .resolution
                 .as_deref() == Some("audio only");
 
-            //Filter out HLS/M3U8 streams
+            // Filter out HLS/M3U8 streams
             let is_not_hls = format
                 .download_info
                 .manifest_url
@@ -57,12 +55,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_audio_only && is_not_hls
         }).collect();
 
-        //Error if no audio format found
+    // Error if no audio format found
     if audio_formats.is_empty(){
         return Err("No non-HLS audio track found".into());
     }
 
-    //List of explicitely marked "original"
+    // List of explicitly marked "original"
     let exp_original: Vec<_> = audio_formats
         .iter()
         .filter(|format| {
@@ -73,14 +71,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(false)
         }).copied().collect();
         
-    //Prefer original
+    // Prefer original
     let candidates = if !exp_original.is_empty(){
         exp_original
     }else{
         audio_formats.clone()
     };
 
-    //select highest quality audio
+    // Select highest quality audio
     let original_audio = candidates
         .into_iter()
         .max_by(|a, b| {
@@ -95,7 +93,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .partial_cmp(&b_quality)
                         .unwrap_or(Equal)
                 })
-
         }).ok_or("Could not select an audio format")?;
     
     println!("Original audio: {} - {}",
@@ -103,10 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         original_audio.format_note.as_deref().unwrap_or("unknown")
     );
 
+    // Video quality menu
 
-    //Video quality menu
-
-    //Collect all available video resolution.
+    // Collect all available video resolutions.
     let mut resolutions: Vec<u32> = video
         .formats
         .iter()
@@ -116,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|height| *height > 0)
         .collect();
 
-    //Remove duplicate resolutions and sort from heighest to lowest.
+    // Remove duplicate resolutions and sort from highest to lowest.
     resolutions.sort_unstable();
     resolutions.dedup();
     resolutions.reverse();
@@ -124,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No video formats found".into());
     }
 
-    //Choose quality
+    // Choose quality
     println!();
     println!("Choose video quality: ");
     for (index, resolution) in resolutions.iter().enumerate(){
@@ -146,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let selected_height = resolutions[choice-1];
 
-    //Find the best video format at selected resolution.
+    // Find the best video format at selected resolution.
     let video_format = video
         .formats
         .iter()
@@ -171,64 +167,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("unknown")
     );
 
+    // Cross-platform path handling
+    // Temporary files in system temp directory
+    let temp_dir = std::env::temp_dir();
+    let video_temp = temp_dir.join("video_stream.mp4");
+    let audio_temp = temp_dir.join("audio_stream.m4a");
+    
+    // Final output in OS downloads directory with video title
+    let downloads_dir = dirs::download_dir()
+        .ok_or("Could not determine the downloads directory")?;
+    let sanitized_title = video.title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>();
+    let video_destination = downloads_dir.join(format!("{}.mp4", sanitized_title));
 
-    //Linux
-    // // Temporary paths
-    // let temp_dir = PathBuf::from("/home/samannyo/Downloads");
-    // let video_temp = temp_dir.join("video_stream.mp4");
-    // let audio_temp = temp_dir.join("audio_stream");
-    // //Final output path
-    // let video_destinaion = temp_dir.join("video_download.mp4");
+    // Download video stream
+    println!("Downloading video...");
 
+    let video_path = downloader
+        .download_format(video_format, video_temp.to_str().unwrap()).await?;
+    println!("Video stream downloaded: {:?}", video_path);
 
-    //Windows
-    // Temporary paths
-    let video_temp = PathBuf::from("video_stream.mp4");
-    let audio_temp = PathBuf::from("audio_stream");
-    //Final output path
-    let video_destinaion = PathBuf::from("C:\\Users\\samannyo\\Downloads\\video_download.mp4");
+    // Download audio stream
+    println!("Downloading audio...");
 
+    let audio_path = downloader
+        .download_format(original_audio, audio_temp.to_str().unwrap()).await?;
+    println!("Audio stream downloaded: {:?}", audio_path);
 
+    // Combine video and audio
+    println!("Combining video and original audio...");
 
-        //Download video stream
-        println!("Downloading video...");
+    let final_path = downloader
+        .combine_audio_and_video_to_path(
+            audio_path, 
+            video_path, 
+            &video_destination,
+        ).await?;
 
-        let video_path = downloader
-            .download_format(video_format, video_temp.to_str().unwrap()).await?;
-        println!("Video stream downloaded: {:?}", video_path);
+    println!("Video saved to: {:?}", final_path);
 
-        //Download audio stream
-        println!("Downloading audio...");
+    // Clean up temporary files only (preserve libs and output directories)
+    let _ = std::fs::remove_file(&video_temp);
+    let _ = std::fs::remove_file(&audio_temp);
+    let _ = std::fs::remove_dir_all("output");
 
-        let audio_path = downloader
-            .download_format(original_audio, audio_temp.to_str().unwrap()).await?;
-        println!("Audio stream downloaded: {:?}", audio_path);
-
-
-
-        //Combine video and audio
-        println!("Combining video and original audio...");
-
-        let final_path = downloader
-            .combine_audio_and_video_to_path(
-                audio_path, 
-                video_path, 
-                &video_destinaion,
-            ).await?;
-
-        println!("Video Path: {:?}", final_path);
-
-
-        //clean temp files and dirs
-        let _ = std::fs::remove_file(video_temp);
-        let _ = std::fs::remove_file(audio_temp);
-        let _ = std::fs::remove_dir_all("libs");
-        let _ = std::fs::remove_dir_all("output");
-
-        print!("Press enter to exit...");
-        io::stdout().flush()?;
-        let mut exit = String::new();
-        io::stdin().read_line(&mut exit)?;
+    print!("Press enter to exit...");
+    io::stdout().flush()?;
+    let mut exit = String::new();
+    io::stdin().read_line(&mut exit)?;
 
     Ok(())
 }
