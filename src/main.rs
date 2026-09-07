@@ -29,6 +29,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
+        //Parsing url for different types of yt links.
+        let url = if url.starts_with("https://www.youtube.com/watch?v=") {
+            let video_id = url
+                .split("v=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .ok_or("Invalid YouTube URL")?;
+            format!("https://youtu.be/{}", video_id)
+        } else {
+            url.to_string()
+        };
+
+        
         // Fetching video information.
         println!("Fetching Video Information");
         let video = downloader.fetch_video_infos_fresh(url).await?;
