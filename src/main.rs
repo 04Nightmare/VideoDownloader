@@ -1,6 +1,8 @@
 use std::cmp::Ordering::Equal;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use yt_dlp::Downloader;
 
 #[tokio::main]
@@ -14,34 +16,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         libraries_dir,
         output_dir
     ).await?.build().await?;
-
     println!("Libraries ready.");
+    println!();
 
     loop {
-        print!("Enter URL (or 'exit', 'quit'): ");
+        print!("Enter URL [--audio-only] (or 'exit', 'quit'): ");
         io::stdout().flush()?;
 
-        let mut url = String::new();
-        io::stdin().read_line(&mut url)?;
-        let url = url.trim();
+        let mut input_line = String::new();
+        io::stdin().read_line(&mut input_line)?;
+        let input_line = input_line.trim();
 
-        if url.is_empty() || url.eq_ignore_ascii_case("exit") || url.eq_ignore_ascii_case("quit") {
+        if input_line.is_empty() || input_line.eq_ignore_ascii_case("exit") || input_line.eq_ignore_ascii_case("quit") {
             break;
         }
 
+
+        // Parse URL and optional args (e.g. --audio-only).
+        let mut tokens = input_line.split_whitespace();
+        let url_input = tokens.next().unwrap_or_default();
+        let audio_only = tokens.any(|arg| arg == "--audio-only");
+
         //Parsing url for different types of yt links.
-        let url = if url.starts_with("https://www.youtube.com/watch?v=") {
-            let video_id = url
+        let url = if url_input.starts_with("https://www.youtube.com/watch?v=") {
+            let video_id = url_input
                 .split("v=")
                 .nth(1)
                 .and_then(|s| s.split('&').next())
                 .ok_or("Invalid YouTube URL")?;
             format!("https://youtu.be/{}", video_id)
         } else {
-            url.to_string()
+            url_input.to_string()
         };
 
-        
+
         // Fetching video information.
         println!("Fetching Video Information");
         let video = downloader.fetch_video_infos_fresh(url).await?;
@@ -112,6 +120,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             original_audio.format_id,
             original_audio.format_note.as_deref().unwrap_or("unknown")
         );
+
+
+        //Option for audio only.
+        let downloads_dir = dirs::download_dir()
+            .ok_or("Could not determine the downloads directory")?;
+        let sanitized_title = video.title
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+
+        // Audio-only download.
+        if audio_only {
+            let audio_destination = downloads_dir.join(format!("{}.m4a", sanitized_title));
+            println!();
+            println!("Downloading audio only...");
+            let audio_path = downloader
+                .download_format(original_audio, audio_destination.to_str().unwrap()).await?;
+
+            println!("Audio saved to: {:?}", audio_path);
+            println!();
+            continue;
+        }
+
 
         // Video quality menu
 
@@ -191,19 +222,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or("unknown")
         );
 
-        // Cross-platform path handling
         // Temporary files in system temp directory
         let temp_dir = std::env::temp_dir();
         let video_temp = temp_dir.join("video_stream.mp4");
         let audio_temp = temp_dir.join("audio_stream.m4a");
 
         // Final output in OS downloads directory with video title
-        let downloads_dir = dirs::download_dir()
-            .ok_or("Could not determine the downloads directory")?;
-        let sanitized_title = video.title
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
-            .collect::<String>();
         let video_destination = downloads_dir.join(format!("{}.mp4", sanitized_title));
 
         // Download video stream
@@ -240,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    println!("Goodbye!!...");
+    println!("Goodbye!! UwU...");
+    thread::sleep(Duration::from_secs(2));
     Ok(())
 }
