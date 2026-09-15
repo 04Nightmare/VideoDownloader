@@ -1,9 +1,80 @@
 use std::cmp::Ordering::Equal;
+use std::error::Error;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use yt_dlp::Downloader;
+
+type BoxError = Box<dyn Error>;
+
+//Replace character that isn't alphanumeric, space, dash or underscore
+fn sanitize_filename(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn prompt_line(prompt: &str) -> io::Result<String> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+ 
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+
+fn prompt_choice(count: usize) -> Option<usize> {
+    println!();
+    print!("Enter choice: ");
+    io::stdout().flush().ok()?;
+
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice).ok()?;
+    let choice: usize = choice.trim().parse().ok()?;
+    println!();
+
+    if choice == 0 || choice > count {
+        return None;
+    }
+    Some(choice)
+}
+
+//The parsed contents of a line typed at the main prompt
+struct UserCommand {
+    url: String,
+    audio_only: bool,
+}
+
+//Parse a raw input line into a normalized YouTube URL plus any flag
+fn parse_user_command(input_line: &str) -> Result<UserCommand, BoxError> {
+    let mut tokens = input_line.split_whitespace();
+    let url_input = tokens.next().unwrap_or_default();
+    let audio_only = tokens.any(|arg| arg == "--audio-only");
+ 
+    let url = normalize_youtube_url(url_input)?;
+    Ok(UserCommand { url, audio_only })
+}
+
+//Convert a `watch?v=` style YouTube URL into the shorter `youtu.be` form.
+fn normalize_youtube_url(url_input: &str) -> Result<String, BoxError> {
+    if let Some(video_id) = url_input
+        .strip_prefix("https://www.youtube.com/watch?v=")
+        .map(|rest| rest.split('&').next().unwrap_or(rest))
+    {
+        Ok(format!("https://youtu.be/{}", video_id))
+    } else {
+        Ok(url_input.to_string())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,12 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     loop {
-        print!("Enter URL [--audio-only] (or 'exit', 'quit'): ");
-        io::stdout().flush()?;
-
-        let mut input_line = String::new();
-        io::stdin().read_line(&mut input_line)?;
-        let input_line = input_line.trim();
+        let input_line = prompt_line("Enter URL [--audio-only] (or 'exit', 'quit'): ")?;
 
         if input_line.is_empty() || input_line.eq_ignore_ascii_case("exit") || input_line.eq_ignore_ascii_case("quit") {
             break;
@@ -33,26 +99,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
         // Parse URL and optional args (e.g. --audio-only).
-        let mut tokens = input_line.split_whitespace();
-        let url_input = tokens.next().unwrap_or_default();
-        let audio_only = tokens.any(|arg| arg == "--audio-only");
-
-        //Parsing url for different types of yt links.
-        let url = if url_input.starts_with("https://www.youtube.com/watch?v=") {
-            let video_id = url_input
-                .split("v=")
-                .nth(1)
-                .and_then(|s| s.split('&').next())
-                .ok_or("Invalid YouTube URL")?;
-            format!("https://youtu.be/{}", video_id)
-        } else {
-            url_input.to_string()
+        let command = match parse_user_command(&input_line) {
+            Ok(command) => command,
+            Err(err) => {
+                eprintln!("{}", err);
+                continue;
+            }
         };
-
 
         // Fetching video information.
         println!("Fetching Video Information");
-        let video = downloader.fetch_video_infos_fresh(url).await?;
+        let video = downloader.fetch_video_infos_fresh(command.url).await?;
         println!("VIDEO TITLE: {}", video.title);
 
         // Original audio
@@ -125,13 +182,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //Option for audio only.
         let downloads_dir = dirs::download_dir()
             .ok_or("Could not determine the downloads directory")?;
-        let sanitized_title = video.title
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
-            .collect::<String>();
-
+        let sanitized_title = sanitize_filename(&video.title);
         // Audio-only download.
-        if audio_only {
+        if command.audio_only {
             let audio_destination = downloads_dir.join(format!("{}.m4a", sanitized_title));
             println!();
             println!("Downloading audio only...");
@@ -172,26 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}. {}p", index+1, resolution);
         }
 
-        println!();
-        print!("Enter choice: ");
-        io::stdout().flush()?;
-
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        let choice: usize = match choice.trim().parse() {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("Invalid choice");
-                println!();
-                continue;
-            }
-        };
-
-        if choice == 0 || choice > resolutions.len() {
-            eprintln!("Invalid choice");
-            println!();
-            continue;
-        }
+        let choice = prompt_choice(resolutions.len()).ok_or("Invalid choice")?;
 
         println!();
 
