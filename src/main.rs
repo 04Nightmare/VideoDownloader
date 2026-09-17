@@ -11,6 +11,10 @@ use yt_dlp::Downloader;
 
 type BoxError = Box<dyn Error>;
 
+const MIN_VALID_VIDEO_BYTES: u64 = 100 * 1024;
+
+const MIN_VALID_AUDIO_BYTES: u64 = 10 * 1024;
+
 //Replace character that isn't alphanumeric, space, dash or underscore
 fn sanitize_filename(title: &str) -> String {
     title
@@ -95,7 +99,8 @@ fn find_audio_formats(video: &Video) -> Vec<&Format> {
 
 //From a list of audio formats, pick the best one
 //prefer formats explicitly marked "original", then pick the highest bitrate/quality
-fn select_best_audio_format<'a>(audio_formats: &[&'a Format]) -> Option<&'a Format> {
+//or fall back to the next best option if current one is broken
+fn rank_audio_formats<'a>(audio_formats: &[&'a Format]) -> Vec<&'a Format> {
     let exp_original: Vec<&Format> = audio_formats
         .iter()
         .filter(|format| {
@@ -108,13 +113,13 @@ fn select_best_audio_format<'a>(audio_formats: &[&'a Format]) -> Option<&'a Form
         .copied()
         .collect();
  
-    let candidates = if !exp_original.is_empty() {
+    let mut candidates = if !exp_original.is_empty() {
         exp_original
     } else {
         audio_formats.to_vec()
     };
  
-    candidates.into_iter().max_by(|a, b| {
+    candidates.sort_by(|a, b| {
         let a_rate = a.rates_info.audio_rate.unwrap_or_default();
         let b_rate = b.rates_info.audio_rate.unwrap_or_default();
         a_rate
@@ -125,7 +130,8 @@ fn select_best_audio_format<'a>(audio_formats: &[&'a Format]) -> Option<&'a Form
                 let b_quality = b.quality_info.quality.unwrap_or_default();
                 a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
             })
-    })
+    });
+    candidates
 }
 
 //Collect distinct video heights (resolutions), sorted from highest to lowest.
@@ -144,22 +150,27 @@ fn available_resolutions(video: &Video) -> Vec<u32> {
 }
 
 //Pick the highest quality video
-fn select_best_video_format(video: &Video, height: u32) -> Option<&Format> {
-    video
+//and gives callers a fallback list
+fn rank_video_formats(video: &Video, height: u32) -> Vec<&Format> {
+    let mut candidates: Vec<&Format> = video
         .formats
         .iter()
         .filter(|format| {
             format.video_resolution.height == Some(height) && format.video_resolution.width.is_some()
         })
-        .max_by(|a, b| {
-            let a_quality = a.quality_info.quality.unwrap_or_default();
-            let b_quality = b.quality_info.quality.unwrap_or_default();
-            a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
-        })
+        .collect();
+ 
+    candidates.sort_by(|a, b| {
+        let a_quality = a.quality_info.quality.unwrap_or_default();
+        let b_quality = b.quality_info.quality.unwrap_or_default();
+        b_quality.partial_cmp(&a_quality).unwrap_or(Equal)
+    });
+ 
+    candidates
 }
 
 //Choose video quality menu
-fn choose_video_format<'a>(video: &'a Video) -> Result<&'a Format, BoxError> {
+fn choose_video_format<'a>(video: &'a Video) -> Result<Vec<&'a Format>, BoxError> {
     let resolutions = available_resolutions(video);
     if resolutions.is_empty() {
         return Err("No video formats found".into());
@@ -172,15 +183,52 @@ fn choose_video_format<'a>(video: &'a Video) -> Result<&'a Format, BoxError> {
     }
  
     let choice = prompt_choice(resolutions.len()).ok_or("Invalid choice")?;
-    let selected_height = resolutions[choice - 1];
- 
-    select_best_video_format(video, selected_height).ok_or_else(|| "Could not find selected video format".into())
+    let selected_height = resolutions[choice-1];
+
+    let candidates = rank_video_formats(video, selected_height);
+    if candidates.is_empty(){
+        return Err("Could not find selected video fromat".into());
+    }
+    Ok(candidates)
 }
 
-//Download audio only
+//Downloading and checking the result if its a valid video
+async fn download_first_valid<'a>(
+    downloader: &Downloader,
+    candidates: &[&'a Format],
+    destination: &str,
+    min_size_byte: u64,
+) -> Result<(PathBuf, &'a Format), BoxError> {
+    let mut last_error: Option<BoxError> = None;
+    for format in candidates {
+        match downloader.download_format(*format, destination).await {
+            Ok(path) => match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() >= min_size_byte => return Ok((path, *format)),
+                Ok(meta) => {
+                    eprintln!("Format {} downloaded but looks invalid ({} bytes) - likely throtteled or restricted by yt, trying next option...",
+                        format.format_id, meta.len()
+                    );
+                    let _ = std::fs::remove_file(&path);
+                    last_error = Some(format!("format {} produced an invalid file", format.format_id).into());
+                }
+                Err(err) => {
+                    last_error = Some(Box::new(err));
+                }
+            },
+            Err(err) => {
+                eprintln!("Format {} failed to download ({}), trying next option...", format.format_id, err);
+                last_error = Some(err.into());
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "No working format found".into()))
+}
+
+//Download audio only or
+//fall back through `audio_candidates` if best one is bad
 async fn download_audio_only(
     downloader: &Downloader,
-    audio_format: &Format,
+    audio_candidates: &[&Format],
     downloads_dir: &Path,
     sanitized_title: &str,
 ) -> Result<PathBuf, BoxError> {
@@ -188,50 +236,53 @@ async fn download_audio_only(
  
     println!();
     println!("Downloading audio only...");
-    let audio_path = downloader
-        .download_format(audio_format, audio_destination.to_str().unwrap())
-        .await?;
- 
+    let (audio_path, used_format) = download_first_valid(
+        downloader, 
+        audio_candidates,
+        audio_destination.to_str().unwrap(),
+        MIN_VALID_AUDIO_BYTES
+    ).await?;
+    println!("Used audio format: {}", used_format.format_id);
     Ok(audio_path)
 }
 
 //Download video and audio and merging
 async fn download_video_with_audio(
     downloader: &Downloader,
-    video_format: &Format,
-    audio_format: &Format,
+    video_candidates: &[&Format],
+    audio_candidates: &[&Format],
     downloads_dir: &Path,
     sanitized_title: &str,
 ) -> Result<PathBuf, BoxError> {
-    println!(
-        "Video format: {} - {}",
-        video_format.format_id,
-        video_format.video_resolution.resolution.as_deref().unwrap_or("unknown")
-    );
- 
     let temp_dir = std::env::temp_dir();
     let video_temp = temp_dir.join("video_stream.mp4");
     let audio_temp = temp_dir.join("audio_stream.m4a");
     let video_destination = downloads_dir.join(format!("{}.mp4", sanitized_title));
  
     println!("Downloading video...");
-    let video_path = downloader
-        .download_format(video_format, video_temp.to_str().unwrap())
-        .await?;
-    println!("Video stream downloaded: {:?}", video_path);
- 
+    let (video_path, used_video_format) = download_first_valid(
+        downloader, video_candidates, video_temp.to_str().unwrap(), MIN_VALID_VIDEO_BYTES).await?;
+    println!(
+        "Video stream downloaded: {:?} (format {} - {})",
+        video_path,
+        used_video_format.format_id,
+        used_video_format.video_resolution.resolution.as_deref().unwrap_or("unknown")
+    );
+
     println!("Downloading audio...");
-    let audio_path = downloader
-        .download_format(audio_format, audio_temp.to_str().unwrap())
-        .await?;
-    println!("Audio stream downloaded: {:?}", audio_path);
+    let (audio_path, used_audio_format) = download_first_valid(
+        downloader, audio_candidates, audio_temp.to_str().unwrap(), MIN_VALID_AUDIO_BYTES).await?;
+    println!(
+        "Audio stream downloaded: {:?} (format {})",
+        audio_path, used_audio_format.format_id
+    );
  
     println!("Combining video and original audio...");
     let final_path = downloader
         .combine_audio_and_video_to_path(audio_path, video_path, &video_destination)
         .await?;
  
-    // Clean up temporary files only (preserve libs and output directories)
+    // Clean up temporary files only (preserve libs)
     let _ = std::fs::remove_file(&video_temp);
     let _ = std::fs::remove_file(&audio_temp);
     let _ = std::fs::remove_dir_all("output");
@@ -254,34 +305,33 @@ async fn process_url(
         return Err("No non-HLS audio track found".into());
     }
  
-    let original_audio =
-        select_best_audio_format(&audio_formats).ok_or("Could not select an audio format")?;
+    let audio_candidates = rank_audio_formats(&audio_formats);
+    let best_audio = *&audio_candidates.first().ok_or("Could not select an audio format")?;
  
     println!(
         "Original audio: {} - {}",
-        original_audio.format_id,
-        original_audio.format_note.as_deref().unwrap_or("unknown")
+        best_audio.format_id,
+        best_audio.format_note.as_deref().unwrap_or("unknown")
     );
  
     let sanitized_title = sanitize_filename(&video.title);
  
     if command.audio_only {
         let audio_path =
-            download_audio_only(downloader, original_audio, downloads_dir, &sanitized_title).await?;
+            download_audio_only(downloader, &audio_candidates, downloads_dir, &sanitized_title).await?;
         println!("Audio saved to: {:?}", audio_path);
         println!();
         return Ok(());
     }
  
-    let video_format = choose_video_format(&video)?;
-    let final_path = download_video_with_audio(
+   let video_candidates = choose_video_format(&video)?;
+   let final_path = download_video_with_audio(
         downloader,
-        video_format,
-        original_audio,
-        downloads_dir,
-        &sanitized_title,
-    )
-    .await?;
+        &video_candidates, 
+        &audio_candidates, 
+        downloads_dir, 
+        &sanitized_title
+    ).await?;
  
     println!("Video saved to: {:?}", final_path);
     println!();
