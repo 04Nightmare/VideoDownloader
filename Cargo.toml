@@ -7,3 +7,6 @@ edition = "2024"
 tokio = "1.53.1"
 yt-dlp = "2.8.3"
 dirs = "6.0.0"
+
+[patch.crates-io]
+yt-dlp = {path = "./vendor/yt-dlp"}

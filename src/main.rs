@@ -1,3 +1,4 @@
+use core::fmt;
 use std::cmp::Ordering::Equal;
 use std::error::Error;
 use std::io::{self, Write};
@@ -5,15 +6,77 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use yt_dlp::model::format::Format;
+use yt_dlp::model::format::{Format, FormatType};
 use yt_dlp::model::Video;
 use yt_dlp::Downloader;
+//use yt_dlp::utils::validation::sanitize_filename;
 
 type BoxError = Box<dyn Error>;
 
+// Below this size, a downloaded video file is almost certainly not real
+// video data (some YouTube formats, are
+// occasionally throttled/restricted and yt-dlp saves a truncated or
+// error response as a video/audio stream instead of raising an error).
 const MIN_VALID_VIDEO_BYTES: u64 = 100 * 1024;
-
 const MIN_VALID_AUDIO_BYTES: u64 = 10 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    Youtube,
+    Instagram,
+    Twitter,
+    Facebook,
+    Other,
+}
+impl fmt::Display for Platform {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Platform::Youtube => write!(f, "Youtube"),
+            Platform::Instagram => write!(f, "Instagram"),
+            Platform::Twitter => write!(f, "Twitter/X"),
+            Platform::Facebook => write!(f, "Facebook"),
+            Platform::Other => write!(f, "Other"),
+        }
+    }
+}
+
+//Extract host from url
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+}
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{}",domain))
+}
+
+//Detect platform form url host
+fn detect_platform(url: &str) -> Platform {
+    let host = host_of(url);
+    if ["youtube.com", "youtu.be", "youtube-nocookie.com"].iter().any(|d| host_matches(&host, d)) {
+        Platform::Youtube
+    }else if host_matches(&host, "instagram.com") {
+        Platform::Instagram
+    }else if host_matches(&host, "twitter.com") || host_matches(&host, "x.com") {
+        Platform::Twitter
+    } else if ["facebook.com", "fb.com", "fb.watch"].iter().any(|d| host_matches(&host, d))
+    {
+        Platform::Facebook
+    } else {
+        Platform::Other
+    }
+}
+
 
 //Replace character that isn't alphanumeric, space, dash or underscore
 fn sanitize_filename(title: &str) -> String {
@@ -27,6 +90,11 @@ fn sanitize_filename(title: &str) -> String {
             }
         })
         .collect()
+}
+
+//Format directly downlodable only if it is not a manifest/HLS playlist
+fn is_direct(format: &Format) -> bool {
+    format.download_info.manifest_url.is_none()
 }
 
 //Prompt to type a line and return the trimmed result.
@@ -56,21 +124,6 @@ fn prompt_choice(count: usize) -> Option<usize> {
     Some(choice)
 }
 
-//The parsed contents of a line typed at the main prompt
-struct UserCommand {
-    url: String,
-    audio_only: bool,
-}
-
-//Parse a raw input line into a normalized YouTube URL plus any flag
-fn parse_user_command(input_line: &str) -> Result<UserCommand, BoxError> {
-    let mut tokens = input_line.split_whitespace();
-    let url_input = tokens.next().unwrap_or_default();
-    let audio_only = tokens.any(|arg| arg == "--audio-only");
- 
-    let url = normalize_youtube_url(url_input)?;
-    Ok(UserCommand { url, audio_only })
-}
 
 //Convert a `watch?v=` style YouTube URL into the shorter `youtu.be` form.
 fn normalize_youtube_url(url_input: &str) -> Result<String, BoxError> {
@@ -84,18 +137,14 @@ fn normalize_youtube_url(url_input: &str) -> Result<String, BoxError> {
     }
 }
 
-//Return every non-HLS, audio-only format available for a video.
-fn find_audio_formats(video: &Video) -> Vec<&Format> {
-    video
-        .formats
-        .iter()
-        .filter(|format| {
-            let is_audio_only = format.video_resolution.resolution.as_deref() == Some("audio only");
-            let is_not_hls = format.download_info.manifest_url.is_none();
-            is_audio_only && is_not_hls
-        })
-        .collect()
+//file extension reported by the format, falling back to default when unknown
+fn format_extension<'a>(format: &Format, default: &'a str) -> &'a str {
+    match format.download_info.ext.as_str() {
+        "bin" => default,
+        ext => ext,
+    }
 }
+
 
 //From a list of audio formats, pick the best one
 //prefer formats explicitly marked "original", then pick the highest bitrate/quality
@@ -122,22 +171,21 @@ fn rank_audio_formats<'a>(audio_formats: &[&'a Format]) -> Vec<&'a Format> {
     candidates.sort_by(|a, b| {
         let a_rate = a.rates_info.audio_rate.unwrap_or_default();
         let b_rate = b.rates_info.audio_rate.unwrap_or_default();
-        a_rate
-            .partial_cmp(&b_rate)
+        b_rate
+            .partial_cmp(&a_rate)
             .unwrap_or(Equal)
             .then_with(|| {
                 let a_quality = a.quality_info.quality.unwrap_or_default();
                 let b_quality = b.quality_info.quality.unwrap_or_default();
-                a_quality.partial_cmp(&b_quality).unwrap_or(Equal)
+                b_quality.partial_cmp(&a_quality).unwrap_or(Equal)
             })
     });
     candidates
 }
 
 //Collect distinct video heights (resolutions), sorted from highest to lowest.
-fn available_resolutions(video: &Video) -> Vec<u32> {
-    let mut resolutions: Vec<u32> = video
-        .formats
+fn available_resolutions(watchable: &Vec<&Format>) -> Vec<u32> {
+    let mut resolutions: Vec<u32> = watchable
         .iter()
         .filter_map(|format| format.video_resolution.height)
         .filter(|height| *height > 0)
@@ -151,57 +199,40 @@ fn available_resolutions(video: &Video) -> Vec<u32> {
 
 //Pick the highest quality video
 //and gives callers a fallback list
-fn rank_video_formats(video: &Video, height: u32) -> Vec<&Format> {
-    let mut candidates: Vec<&Format> = video
-        .formats
-        .iter()
-        .filter(|format| {
-            format.video_resolution.height == Some(height) && format.video_resolution.width.is_some()
-        })
-        .collect();
+fn rank_video_formats<'a>(formats: &[&'a Format]) -> Vec<&'a Format> {
+    let mut candidates: Vec<&Format> = formats.to_vec();
  
     candidates.sort_by(|a, b| {
         let a_quality = a.quality_info.quality.unwrap_or_default();
         let b_quality = b.quality_info.quality.unwrap_or_default();
-        b_quality.partial_cmp(&a_quality).unwrap_or(Equal)
+        b_quality
+            .partial_cmp(&a_quality)
+            .unwrap_or(Equal)
+            .then_with(|| {
+                let a_rate = a.rates_info.total_rate.unwrap_or_default();
+                let b_rate = b.rates_info.total_rate.unwrap_or_default();
+                b_rate.partial_cmp(&a_rate).unwrap_or(Equal)
+            })
     });
  
     candidates
 }
 
-//Choose video quality menu
-fn choose_video_format<'a>(video: &'a Video) -> Result<Vec<&'a Format>, BoxError> {
-    let resolutions = available_resolutions(video);
-    if resolutions.is_empty() {
-        return Err("No video formats found".into());
-    }
- 
-    println!();
-    println!("Choose video quality: ");
-    for (index, resolution) in resolutions.iter().enumerate() {
-        println!("{}. {}p", index + 1, resolution);
-    }
- 
-    let choice = prompt_choice(resolutions.len()).ok_or("Invalid choice")?;
-    let selected_height = resolutions[choice-1];
 
-    let candidates = rank_video_formats(video, selected_height);
-    if candidates.is_empty(){
-        return Err("Could not find selected video fromat".into());
-    }
-    Ok(candidates)
-}
 
 //Downloading and checking the result if its a valid video
 async fn download_first_valid<'a>(
     downloader: &Downloader,
     candidates: &[&'a Format],
-    destination: &str,
+    destination_for: impl Fn(&Format) -> PathBuf,
     min_size_byte: u64,
 ) -> Result<(PathBuf, &'a Format), BoxError> {
     let mut last_error: Option<BoxError> = None;
     for format in candidates {
-        match downloader.download_format(*format, destination).await {
+        let destination = destination_for(*format);
+        let destination_str = destination.to_str().ok_or("Invalid destination path")?;
+
+        match downloader.download_format(*format, destination_str).await {
             Ok(path) => match std::fs::metadata(&path) {
                 Ok(meta) if meta.len() >= min_size_byte => return Ok((path, *format)),
                 Ok(meta) => {
@@ -228,115 +259,251 @@ async fn download_first_valid<'a>(
 //fall back through `audio_candidates` if best one is bad
 async fn download_audio_only(
     downloader: &Downloader,
-    audio_candidates: &[&Format],
+    audio_formats: &[&Format],
+    progressive_formats: &[&Format],
     downloads_dir: &Path,
     sanitized_title: &str,
-) -> Result<PathBuf, BoxError> {
-    let audio_destination = downloads_dir.join(format!("{}.m4a", sanitized_title));
- 
-    println!();
-    println!("Downloading audio only...");
-    let (audio_path, used_format) = download_first_valid(
-        downloader, 
-        audio_candidates,
-        audio_destination.to_str().unwrap(),
-        MIN_VALID_AUDIO_BYTES
-    ).await?;
-    println!("Used audio format: {}", used_format.format_id);
-    Ok(audio_path)
+) -> Result<(), BoxError> {
+    let audio_candidates = rank_audio_formats(audio_formats);
+    if !audio_candidates.is_empty() {
+        println!("Audio: {} - {}", audio_candidates[0]. format_id, audio_candidates[0].format_note.as_deref().unwrap_or("Unknown"));
+        println!();
+        println!("Downloading audio only...");
+
+        let (audio_path, used) = download_first_valid(
+            downloader,
+            &audio_candidates,
+            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "m4a"))),
+            MIN_VALID_AUDIO_BYTES,
+        ).await?;
+
+        println!("Used audio format: {}", used.format_id);
+        println!("Audio saved to: {:?}", audio_path);
+        return Ok(());
+    }
+    //No separate audio tracks: fallback to best progressive file
+    let progressive_candidates = rank_video_formats(progressive_formats);
+    if !progressive_candidates.is_empty() {
+        println!("No separate audio track; downloading best combined file instead.");
+        let (path, used) = download_first_valid(
+            downloader,
+            &progressive_candidates,
+            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4"))),
+            MIN_VALID_VIDEO_BYTES,
+        ).await?;
+
+        println!("Used format: {}", used.format_id);
+        println!("Audio saved to: {:?}", path);
+        println!();
+        return Ok(());
+    }
+    Err("No downloadable audio track found".into())
 }
 
 //Download video and audio and merging
 async fn download_video_with_audio(
     downloader: &Downloader,
-    video_candidates: &[&Format],
-    audio_candidates: &[&Format],
+    progressive_formats: &[&Format],
+    video_only_formats: &[&Format],
+    audio_formats: &[&Format],
     downloads_dir: &Path,
     sanitized_title: &str,
-) -> Result<PathBuf, BoxError> {
+) -> Result<(), BoxError> {
+    //All downloadable formats that carry a picture, for res selection
+    let watchable: Vec<&Format> = progressive_formats
+        .iter()
+        .chain(video_only_formats.iter())
+        .copied()
+        .filter(|format| {
+            format.video_resolution.height.is_some_and(|h| h > 0) && format.video_resolution.width.is_some()
+        })
+        .collect();
+    
+    let resolutions = available_resolutions(&watchable);
+    if resolutions.is_empty() {
+        return Err("No video formats found".into());
+    }
+    
+    println!();
+    println!("Choose video quality: ");
+    for (index, resolution) in resolutions.iter().enumerate() {
+        println!("{}. {}p", index+1, resolution);
+    }
+    let choice = prompt_choice(resolutions.len()).ok_or("Invalid choice")?;
+    let selectd_height = resolutions[choice - 1];
+
+    let at_height: Vec<&Format> = watchable
+        .iter()
+        .copied()
+        .filter(|format| format.video_resolution.height == Some(selectd_height))
+        .collect();
+
+    //Preference for a progressive file: no merge needed.
+    let progressive_at_height: Vec<&Format> = at_height
+        .iter()
+        .copied()
+        .filter(|format| format.format_type() == FormatType::AudioVideo)
+        .collect();
+    let progressive_candidates = rank_video_formats(&progressive_at_height);
+
+    if !progressive_candidates.is_empty() {
+        println!(
+            "Video format: {} - {} (progressive, no merge needed)",
+            progressive_candidates[0].format_id,
+            progressive_candidates[0]
+                .video_resolution
+                .resolution
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+        println!("Downloading Video...");
+
+        let (path, used) = download_first_valid(
+            downloader,
+            &progressive_candidates,
+            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4"))),
+            MIN_VALID_VIDEO_BYTES,
+        ).await?;
+        println!("Used format: {}", used.format_id);
+        println!("Video saved to: {:?}", path);
+        return Ok(());
+    }
+
+    //Fallback to seperate video and audio streams merged with ffmpeg
+    let video_only_at_height: Vec<&Format> = at_height
+        .iter()
+        .copied()
+        .filter(|format| format.format_type() == FormatType::Video)
+        .collect();
+    let video_candidates = rank_video_formats(&video_only_at_height);
+    if video_candidates.is_empty(){
+        return Err("Could not find video format".into());
+    }
+    let audio_candidates = rank_audio_formats(audio_formats);
+    if audio_candidates.is_empty(){
+        return Err("No downloadable audio track found".into());
+    }
+
+    // Temporary Files
     let temp_dir = std::env::temp_dir();
     let video_temp = temp_dir.join("video_stream.mp4");
     let audio_temp = temp_dir.join("audio_stream.m4a");
     let video_destination = downloads_dir.join(format!("{}.mp4", sanitized_title));
  
     println!("Downloading video...");
-    let (video_path, used_video_format) = download_first_valid(
-        downloader, video_candidates, video_temp.to_str().unwrap(), MIN_VALID_VIDEO_BYTES).await?;
+    let (video_path, used_video) = download_first_valid(
+        downloader,
+        &video_candidates,
+        |_| video_temp.clone(),
+        MIN_VALID_VIDEO_BYTES
+    ).await?;
+
     println!(
-        "Video stream downloaded: {:?} (format {} - {})",
-        video_path,
-        used_video_format.format_id,
-        used_video_format.video_resolution.resolution.as_deref().unwrap_or("unknown")
+        "Video stream downloaded (format {} - {})",
+        used_video.format_id,
+        used_video.video_resolution.resolution.as_deref().unwrap_or("unknown")
     );
 
+    println!();
     println!("Downloading audio...");
-    let (audio_path, used_audio_format) = download_first_valid(
-        downloader, audio_candidates, audio_temp.to_str().unwrap(), MIN_VALID_AUDIO_BYTES).await?;
+    let (audio_path, used_audio) = download_first_valid(
+        downloader,
+        &audio_candidates, 
+        |_| audio_temp.clone(), 
+        MIN_VALID_AUDIO_BYTES
+    ).await?;
+
     println!(
-        "Audio stream downloaded: {:?} (format {})",
-        audio_path, used_audio_format.format_id
+        "Audio stream downloaded (format {})",
+        used_audio.format_id
     );
  
-    println!("Combining video and original audio...");
+    println!();
+    println!("Combining video and audio...");
     let final_path = downloader
         .combine_audio_and_video_to_path(audio_path, video_path, &video_destination)
         .await?;
- 
+    println!("Video saved to: {:?}", final_path);
+    println!();
+
     // Clean up temporary files only (preserve libs)
     let _ = std::fs::remove_file(&video_temp);
     let _ = std::fs::remove_file(&audio_temp);
     let _ = std::fs::remove_dir_all("output");
  
-    Ok(final_path)
+    Ok(())
 }
+
+//The parsed contents of a line typed at the main prompt
+struct UserCommand {
+    url: String,
+    audio_only: bool,
+}
+
+//Parse a raw input line into a normalized YouTube URL plus any flag
+fn parse_user_command(input_line: &str) -> Result<UserCommand, BoxError> {
+    let mut tokens = input_line.split_whitespace();
+    let url_input = tokens.next().unwrap_or_default();
+    let audio_only = tokens.any(|arg| arg == "--audio-only");
+ 
+    let url = normalize_youtube_url(url_input)?;
+    Ok(UserCommand { url, audio_only })
+}
+
 
 //Handle url, fetch info, pick formats and download
 async fn process_url(
     downloader: &Downloader,
-    downloads_dir: &Path,
     command: UserCommand,
 ) -> Result<(), BoxError> {
+    let url_input = command.url.as_str();
+    let platform = detect_platform(url_input);
+    println!("Detected platform: {}", platform);
+
+    let normalized_url = normalize_youtube_url(url_input)?;
+
+    //Fetching video Information
     println!("Fetching Video Information");
-    let video = downloader.fetch_video_infos_fresh(command.url).await?;
+    let video = downloader.fetch_video_infos_fresh(normalized_url).await?;
     println!("VIDEO TITLE: {}", video.title);
- 
-    let audio_formats = find_audio_formats(&video);
-    if audio_formats.is_empty() {
-        return Err("No non-HLS audio track found".into());
-    }
- 
-    let audio_candidates = rank_audio_formats(&audio_formats);
-    let best_audio = *&audio_candidates.first().ok_or("Could not select an audio format")?;
- 
-    println!(
-        "Original audio: {} - {}",
-        best_audio.format_id,
-        best_audio.format_note.as_deref().unwrap_or("unknown")
-    );
- 
+    
+    let downloads_dir = dirs::download_dir().ok_or("Could not find download directory.")?;
     let sanitized_title = sanitize_filename(&video.title);
  
+    // Classify every direct (non-HLS/manifest) format by its actual codec
+    // content (acodec/vcodec presence) rather than any display-only string field
+    let audio_formats: Vec<&Format> = video
+        .formats
+        .iter()
+        .filter(|format| is_direct(format) && format.format_type() == FormatType::Audio)
+        .collect();
+
+    let progressive_formats: Vec<&Format> = video
+        .formats
+        .iter()
+        .filter(|format| is_direct(format) && format.format_type() == FormatType::AudioVideo)
+        .collect();
+
+    let video_only_formats: Vec<&Format> = video
+        .formats
+        .iter()
+        .filter(|format| is_direct(format) && format.format_type() == FormatType::Video)
+        .collect();
+
+ 
     if command.audio_only {
-        let audio_path =
-            download_audio_only(downloader, &audio_candidates, downloads_dir, &sanitized_title).await?;
-        println!("Audio saved to: {:?}", audio_path);
-        println!();
-        return Ok(());
+        return download_audio_only(downloader, &audio_formats, &progressive_formats, &downloads_dir, &sanitized_title)
+            .await;
     }
- 
-   let video_candidates = choose_video_format(&video)?;
-   let final_path = download_video_with_audio(
+
+    download_video_with_audio(
         downloader,
-        &video_candidates, 
-        &audio_candidates, 
-        downloads_dir, 
-        &sanitized_title
-    ).await?;
- 
-    println!("Video saved to: {:?}", final_path);
-    println!();
- 
-    Ok(())
+        &progressive_formats,
+        &video_only_formats,
+        &audio_formats,
+        &downloads_dir,
+        &sanitized_title,
+    ).await
 }
 
 //Downlaods the binaries
@@ -358,8 +525,8 @@ async fn setup_bins_downloader() -> Result<Downloader, BoxError> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
    let downloader = setup_bins_downloader().await?;
-    let downloads_dir = dirs::download_dir().ok_or("Could not determine the downloads directory")?;
- 
+   println!("Supported: YouTube, Instagram, Twitter/X, Facebook (and other sites).");
+
     loop {
         let input_line = prompt_line("Enter URL [--audio-only] (or 'exit', 'quit'): ")?;
  
@@ -378,7 +545,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
  
-        if let Err(err) = process_url(&downloader, &downloads_dir, command).await {
+        if let Err(err) = process_url(&downloader, command).await {
             eprintln!("{}", err);
             continue;
         }
