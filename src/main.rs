@@ -97,6 +97,15 @@ fn is_direct(format: &Format) -> bool {
     format.download_info.manifest_url.is_none()
 }
 
+//Remove a file at `path` if it already exists, so a later write starts clean.
+fn clear_existing(path: &Path) {
+    if path.exists() {
+        if let Err(err) = std::fs::remove_file(path) {
+            eprintln!("Warning: could not remove existing file {:?} before overwriting ({})", path, err);
+        }
+    }
+}
+
 //Prompt to type a line and return the trimmed result.
 fn prompt_line(prompt: &str) -> io::Result<String> {
     print!("{}", prompt);
@@ -417,7 +426,11 @@ async fn download_video_with_audio(
         "Audio stream downloaded (format {})",
         used_audio.format_id
     );
- 
+
+    // An existing file at video_destination would make it hang
+    // forever on an interactive overwrite prompt. Clear it first
+    clear_existing(&video_destination);
+
     println!();
     println!("Combining video and audio...");
     let final_path = downloader

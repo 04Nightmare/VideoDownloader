@@ -5,9 +5,9 @@ A small Rust CLI that downloads video/audio from YouTube, Instagram, Twitter/X, 
 ## Features
 
 - **Platform detection** from the URL host (YouTube, Instagram, Twitter/X, Facebook, or generic).
-- **Interactive quality picker** — lists all available resolutions for the video.
+- **Quality picker** — lists all available resolutions for the video.
 - **Smart format selection** — prefers progressive (single-file, audio+video) formats when available; falls back to separate video+audio streams merged with `ffmpeg` otherwise.
-- **Audio-only mode** via `--audio-only`, with automatic fallback to the best combined file if no separate audio track exists.
+- **Audio-only** via `--audio-only`, with automatic fallback to the best combined file if no separate audio track exists.
 - **Automatic retry on bad downloads** — if a chosen format downloads but the file looks too small (a common symptom of throttled/restricted streams), it's discarded and the next-best candidate is tried automatically.
 
 ## Requirements
