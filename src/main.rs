@@ -7,9 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use yt_dlp::model::format::{Format, FormatType};
-use yt_dlp::model::Video;
 use yt_dlp::Downloader;
-//use yt_dlp::utils::validation::sanitize_filename;
+use yt_dlp::utils::validation::sanitize_filename;
 
 type BoxError = Box<dyn Error>;
 
@@ -78,31 +77,43 @@ fn detect_platform(url: &str) -> Platform {
 }
 
 
-//Replace character that isn't alphanumeric, space, dash or underscore
-fn sanitize_filename(title: &str) -> String {
-    title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 //Format directly downlodable only if it is not a manifest/HLS playlist
 fn is_direct(format: &Format) -> bool {
     format.download_info.manifest_url.is_none()
 }
 
 //Remove a file at `path` if it already exists, so a later write starts clean.
-fn clear_existing(path: &Path) {
-    if path.exists() {
-        if let Err(err) = std::fs::remove_file(path) {
-            eprintln!("Warning: could not remove existing file {:?} before overwriting ({})", path, err);
+// fn clear_existing(path: &Path) {
+//     if path.exists() {
+//         if let Err(err) = std::fs::remove_file(path) {
+//             eprintln!("Warning: could not remove existing file {:?} before overwriting ({})", path, err);
+//         }
+//     }
+// }
+
+//
+fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let ext = path.extension().and_then(|e| e.to_str());
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+
+    let mut n: u32 = 1;
+    loop {
+        let file_name = match ext {
+            Some(ext) => format!("{} ({}).{}", stem, n, ext),
+            None => format!("{} ({})", stem, n),
+        };
+        let candidate = parent.join(file_name);
+        if !candidate.exists() {
+            return candidate;
         }
+        n += 1;
     }
 }
 
@@ -239,6 +250,7 @@ async fn download_first_valid<'a>(
     let mut last_error: Option<BoxError> = None;
     for format in candidates {
         let destination = destination_for(*format);
+        //clear_existing(&destination);
         let destination_str = destination.to_str().ok_or("Invalid destination path")?;
 
         match downloader.download_format(*format, destination_str).await {
@@ -282,7 +294,7 @@ async fn download_audio_only(
         let (audio_path, used) = download_first_valid(
             downloader,
             &audio_candidates,
-            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "m4a"))),
+            |candidate| unique_path(&downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "m4a")))),
             MIN_VALID_AUDIO_BYTES,
         ).await?;
 
@@ -297,7 +309,7 @@ async fn download_audio_only(
         let (path, used) = download_first_valid(
             downloader,
             &progressive_candidates,
-            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4"))),
+            |candidate| unique_path(&downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4")))),
             MIN_VALID_VIDEO_BYTES,
         ).await?;
 
@@ -370,7 +382,7 @@ async fn download_video_with_audio(
         let (path, used) = download_first_valid(
             downloader,
             &progressive_candidates,
-            |candidate| downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4"))),
+            |candidate| unique_path(&downloads_dir.join(format!("{}.{}", sanitized_title, format_extension(candidate, "mp4")))),
             MIN_VALID_VIDEO_BYTES,
         ).await?;
         println!("Used format: {}", used.format_id);
@@ -397,7 +409,7 @@ async fn download_video_with_audio(
     let temp_dir = std::env::temp_dir();
     let video_temp = temp_dir.join("video_stream.mp4");
     let audio_temp = temp_dir.join("audio_stream.m4a");
-    let video_destination = downloads_dir.join(format!("{}.mp4", sanitized_title));
+    let video_destination = unique_path(&downloads_dir.join(format!("{}.mp4", sanitized_title)));
  
     println!("Downloading video...");
     let (video_path, used_video) = download_first_valid(
@@ -427,9 +439,6 @@ async fn download_video_with_audio(
         used_audio.format_id
     );
 
-    // An existing file at video_destination would make it hang
-    // forever on an interactive overwrite prompt. Clear it first
-    clear_existing(&video_destination);
 
     println!();
     println!("Combining video and audio...");
