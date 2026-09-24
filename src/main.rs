@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use yt_dlp::model::format::{Format, FormatType};
 use yt_dlp::Downloader;
+use yt_dlp::download::DownloadStatus;
 use yt_dlp::utils::validation::sanitize_filename;
 
 type BoxError = Box<dyn Error>;
@@ -115,6 +116,34 @@ fn unique_path(path: &Path) -> PathBuf {
         }
         n += 1;
     }
+}
+
+//Print an in-place progress bar for a download.
+fn print_progress(label: &str, downloaded: u64, total: u64) {
+    const WIDTH: usize = 30;
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+
+    if total > 0 {
+        let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+        let filled = (ratio * WIDTH as f64).round()as usize;
+        let bar = format!("{}{}", "=".repeat(filled), " ".repeat(WIDTH - filled));
+        print!(
+            "\r{:<28} [{}] {:>3}% ({:.1}/{:.1} MB)   ",
+            label,
+            bar,
+            (ratio * 100.0) as u32,
+            mb(downloaded),
+            mb(total)
+        );
+    }else {
+        print!("\r{:<28} downloaded {:.1} MB   ", label, mb(downloaded));
+    }
+    let _ = io::stdout().flush();
+}
+
+//Builds a progressive callback tied to a specific display label
+fn progress_callback_for(label: String) -> impl Fn(u64, u64) + Send + Sync + 'static {
+    move | downloaded, total| print_progress(&label, downloaded, total)
 }
 
 //Prompt to type a line and return the trimmed result.
@@ -239,8 +268,7 @@ fn rank_video_formats<'a>(formats: &[&'a Format]) -> Vec<&'a Format> {
 }
 
 
-
-//Downloading and checking the result if its a valid video
+//Downloading with progress and checking the result if its a valid video
 async fn download_first_valid<'a>(
     downloader: &Downloader,
     candidates: &[&'a Format],
@@ -248,28 +276,55 @@ async fn download_first_valid<'a>(
     min_size_byte: u64,
 ) -> Result<(PathBuf, &'a Format), BoxError> {
     let mut last_error: Option<BoxError> = None;
+    let manager = downloader.download_manager();
+
     for format in candidates {
         let destination = destination_for(*format);
-        //clear_existing(&destination);
-        let destination_str = destination.to_str().ok_or("Invalid destination path")?;
 
-        match downloader.download_format(*format, destination_str).await {
-            Ok(path) => match std::fs::metadata(&path) {
-                Ok(meta) if meta.len() >= min_size_byte => return Ok((path, *format)),
+        let url = format.url()?.clone();
+        let headers = Some(format.download_info.http_headers.clone());
+        let label = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("download")
+            .to_string();
+
+        let download_id = manager
+            .enqueue_with_progress_and_headers(
+                &url,
+                destination.clone(),
+                None,
+                progress_callback_for(label),
+                headers,
+            ).await;
+        let status = manager.wait_for_completion(download_id).await;
+        println!();
+
+        match status {
+            Some(DownloadStatus::Completed) => match std::fs::metadata(&destination) {
+                Ok(meta) if meta.len() >= min_size_byte => return Ok((destination, *format)),
                 Ok(meta) => {
                     eprintln!("Format {} downloaded but looks invalid ({} bytes) - likely throtteled or restricted by yt, trying next option...",
                         format.format_id, meta.len()
                     );
-                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(&destination);
                     last_error = Some(format!("format {} produced an invalid file", format.format_id).into());
                 }
                 Err(err) => {
                     last_error = Some(Box::new(err));
                 }
             },
-            Err(err) => {
-                eprintln!("Format {} failed to download ({}), trying next option...", format.format_id, err);
-                last_error = Some(err.into());
+            Some(DownloadStatus::Failed { reason }) => {
+                eprintln!("Format {} failed to download ({}), trying next option...", format.format_id, reason);
+                last_error = Some(reason.into());
+            }
+            Some(DownloadStatus::Canceled) => {
+                eprintln!("Format {} download was canceled, trying next option...", format.format_id);
+                last_error = Some(format!("format {} download was canceled", format.format_id).into());
+            }
+            other => {
+                eprintln!("Format {} ended in an unexpected state ({:?}), trying next option...", format.format_id, other);
+                last_error = Some(format!("format {} ended in an unexpected state", format.format_id).into());
             }
         }
     }
